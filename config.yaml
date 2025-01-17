@@ -1,0 +1,9 @@
+azure:
+  endpoint: "https://your-language-resource.cognitiveservices.azure.com/"
+  api_key: "your-api-key"
+
+clu_project:
+  project_name: "clu-project-name"
+
+cner_project:
+  project_name: "cner-project-name"
