@@ -195,3 +195,98 @@ Model Deployment:
 Deploys the trained model to an endpoint.
 """
 
+import requests
+import time
+
+# Azure resource details
+ENDPOINT = "https://<your-resource-name>.cognitiveservices.azure.com/"
+API_KEY = "<your-api-key>"
+
+HEADERS = {
+    "Ocp-Apim-Subscription-Key": API_KEY,
+    "Content-Type": "application/json"
+}
+
+# Project details
+PROJECT_NAME = "my-clu-project"
+DATASET_NAME = "training-dataset"
+DEPLOYMENT_NAME = "production"
+MODEL_LABEL = "v1"
+
+def export_dataset(project_name, dataset_name):
+    """Export labeled dataset from Language Studio."""
+    export_url = f"{ENDPOINT}/language/authoring/v1.0/projects/{project_name}/datasets/{dataset_name}/export"
+    response = requests.post(export_url, headers=HEADERS)
+
+    if response.status_code == 202:
+        job_id = response.json()['jobId']
+        print(f"Dataset export started. Job ID: {job_id}")
+
+        # Monitor export status
+        status_url = f"{ENDPOINT}/language/authoring/v1.0/projects/{project_name}/datasets/{dataset_name}/export/jobs/{job_id}"
+        while True:
+            status_response = requests.get(status_url, headers=HEADERS)
+            status = status_response.json()
+            if status["status"] == "succeeded":
+                download_url = status["resultUrl"]
+                print(f"Dataset exported successfully. Download URL: {download_url}")
+                return download_url
+            elif status["status"] == "failed":
+                print("Dataset export failed.")
+                break
+            else:
+                print("Export in progress...")
+                time.sleep(5)
+    else:
+        print(f"Error exporting dataset: {response.json()}")
+        return None
+
+def download_dataset(download_url, output_path):
+    """Download the exported dataset."""
+    response = requests.get(download_url)
+    if response.status_code == 200:
+        with open(output_path, "wb") as file:
+            file.write(response.content)
+        print(f"Dataset downloaded successfully to {output_path}")
+    else:
+        print(f"Error downloading dataset: {response.status_code}")
+
+def train_model(project_name):
+    """Train a model for the project."""
+    url = f"{ENDPOINT}/language/authoring/v1.0/projects/{project_name}/train"
+    response = requests.post(url, headers=HEADERS)
+    if response.status_code == 202:
+        print("Training started successfully.")
+    else:
+        print(f"Error starting training: {response.json()}")
+
+def deploy_model(project_name, deployment_name, model_label):
+    """Deploy the trained model."""
+    url = f"{ENDPOINT}/language/authoring/v1.0/projects/{project_name}/deployments/{deployment_name}"
+    payload = {
+        "trainedModelLabel": model_label
+    }
+    
+    response = requests.put(url, headers=HEADERS, json=payload)
+    if response.status_code == 201:
+        print(f"Deployment '{deployment_name}' created successfully.")
+    else:
+        print(f"Error deploying model: {response.json()}")
+
+def main():
+    """Main function to automate the entire workflow."""
+    # Step 1: Export dataset
+    download_url = export_dataset(PROJECT_NAME, DATASET_NAME)
+    if download_url:
+        # Step 2: Download dataset
+        output_path = "exported_dataset.json"
+        download_dataset(download_url, output_path)
+
+        # Step 3: Train model
+        train_model(PROJECT_NAME)
+
+        # Step 4: Deploy model
+        deploy_model(PROJECT_NAME, DEPLOYMENT_NAME, MODEL_LABEL)
+
+if __name__ == "__main__":
+    main()
