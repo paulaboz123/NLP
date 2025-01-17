@@ -1,28 +1,197 @@
-from azure.ai.language.conversations import ConversationAuthoringClient
-from azure.core.credentials import AzureKeyCredential
+import requests
 import yaml
 
-def train_clu(endpoint, api_key, project_name):
-    """
-    Train a CLU project using Azure Language Studio.
-    """
-    client = ConversationAuthoringClient(endpoint, AzureKeyCredential(api_key))
+# Azure resource details
+ENDPOINT = "https://<your-resource-name>.cognitiveservices.azure.com/"
+API_KEY = "<your-api-key>"
 
-    print(f"Starting CLU training for project: {project_name}...")
-    poller = client.begin_train_project(project_name, training_mode="standard")
-    result = poller.result()
+HEADERS = {
+    "Ocp-Apim-Subscription-Key": API_KEY,
+    "Content-Type": "application/json"
+}
 
-    if result.status == "succeeded":
-        print(f"CLU training succeeded for project: {project_name}")
+def load_yaml(file_path):
+    """Load configuration from a YAML file."""
+    with open(file_path, 'r') as file:
+        return yaml.safe_load(file)
+
+def upload_dataset(config):
+    """Upload a dataset to the project."""
+    project_name = config['project_name']
+    dataset_name = config['dataset_name']
+    dataset_file = config['dataset_file']
+    
+    with open(dataset_file, 'r') as file:
+        dataset_content = file.read()
+    
+    url = f"{ENDPOINT}/language/authoring/v1.0/projects/{project_name}/datasets"
+    payload = {
+        "name": dataset_name,
+        "format": config['dataset_format'],
+        "content": dataset_content
+    }
+    
+    response = requests.post(url, headers=HEADERS, json=payload)
+    if response.status_code == 201:
+        print(f"Dataset '{dataset_name}' uploaded successfully.")
     else:
-        print(f"CLU training failed: {result.error}")
+        print(f"Error uploading dataset: {response.json()}")
 
-if __name__ == "__main__":
-    with open("config.yaml", "r") as f:
-        config = yaml.safe_load(f)
+def train_model(config):
+    """Train a model for the project."""
+    project_name = config['project_name']
+    
+    url = f"{ENDPOINT}/language/authoring/v1.0/projects/{project_name}/train"
+    response = requests.post(url, headers=HEADERS)
+    if response.status_code == 202:
+        print("Training started successfully.")
+    else:
+        print(f"Error starting training: {response.json()}")
 
-    train_clu(
-        endpoint=config["azure"]["endpoint"],
-        api_key=config["azure"]["api_key"],
-        project_name=config["clu_project"]["project_name"]
-    )
+def deploy_model(config):
+    """Deploy the trained model."""
+    project_name = config['project_name']
+    deployment_name = config['deployment_name']
+    model_label = config['model_label']
+    
+    url = f"{ENDPOINT}/language/authoring/v1.0/projects/{project_name}/deployments/{deployment_name}"
+    payload = {
+        "trainedModelLabel": model_label
+    }
+    
+    response = requests.put(url, headers=HEADERS, json=payload)
+    if response.status_code == 201:
+        print(f"Deployment '{deployment_name}' created successfully.")
+    else:
+        print(f"Error deploying model: {response.json()}")
+
+# Load configurations
+dataset_config = load_yaml("dataset.yml")
+train_config = load_yaml("train.yml")
+deploy_config = load_yaml("deploy.yml")
+
+# Run operations
+upload_dataset(dataset_config)
+train_model(train_config)
+deploy_model(deploy_config)
+
+
+
+#########
+"""
+Dataset Configuration (dataset.yml)
+
+
+project_name: "my-clu-project"
+dataset_name: "training-dataset"
+dataset_file: "path/to/your-dataset.json"
+dataset_format: "json"
+Training Configuration (train.yml)
+
+
+project_name: "my-clu-project"
+deployment_name: "production"
+model_label: "v1"
+Deployment Configuration (deploy.yml)
+
+
+project_name: "my-clu-project"
+deployment_name: "production"
+model_label: "v1"
+
+3. Workflow Description
+Define YAML Files: Store project and dataset details in dataset.yml, train.yml, and deploy.yml.
+Run Python Script: The script reads YAML configurations, uploads the dataset, triggers training, and deploys the model.
+Dataset Validation: Ensure your dataset follows the required JSON format.
+4. Considerations
+No Terminal Needed: Everything, including dataset upload, training, and deployment, is handled via code.
+Error Handling: Include detailed error handling for API responses (e.g., 400, 401, 404).
+Batch Script Automation: If necessary, use a lightweight automation tool to execute the Python script in production environments.
+"""
+###
+
+"""
+
+Here’s the full Python script to handle the process programmatically. This includes reading labeled data from Language Studio, exporting it, training a model, and deploying the model without using the UI.
+
+Script for End-to-End Workflow
+This script:
+
+Exports labeled data from a Language Studio project.
+Downloads the dataset programmatically.
+Triggers training of the model using the REST API.
+Deploys the trained model to an endpoint.
+"""
+
+import requests
+import yaml
+import time
+
+# Azure resource details
+ENDPOINT = "https://<your-resource-name>.cognitiveservices.azure.com/"
+API_KEY = "<your-api-key>"
+
+HEADERS = {
+    "Ocp-Apim-Subscription-Key": API_KEY,
+    "Content-Type": "application/json"
+}
+
+def load_yaml(file_path):
+    """Load configuration from a YAML file."""
+    with open(file_path, 'r') as file:
+        return yaml.safe_load(file)
+
+def export_dataset(config):
+    """Export labeled dataset from Language Studio."""
+    project_name = config['project_name']
+    dataset_name = config['dataset_name']
+
+    # Trigger dataset export
+    export_url = f"{ENDPOINT}/language/authoring/v1.0/projects/{project_name}/datasets/{dataset_name}/export"
+    response = requests.post(export_url, headers=HEADERS)
+
+    if response.status_code == 202:
+        job_id = response.json()['jobId']
+        print(f"Dataset export started. Job ID: {job_id}")
+
+        # Monitor export status
+        status_url = f"{ENDPOINT}/language/authoring/v1.0/projects/{project_name}/datasets/{dataset_name}/export/jobs/{job_id}"
+        while True:
+            status_response = requests.get(status_url, headers=HEADERS)
+            status = status_response.json()
+            if status["status"] == "succeeded":
+                download_url = status["resultUrl"]
+                print(f"Dataset exported successfully. Download URL: {download_url}")
+                return download_url
+            elif status["status"] == "failed":
+                print("Dataset export faile
+
+"""
+Supporting YAML Files
+dataset.yml
+
+project_name: "my-clu-project"
+dataset_name: "training-dataset"
+dataset_format: "json"
+train.yml
+
+project_name: "my-clu-project"
+deploy.yml
+
+project_name: "my-clu-project"
+deployment_name: "production"
+model_label: "v1"
+"""
+
+"""
+Explanation of Steps
+Dataset Export:
+Uses the export API to retrieve a downloadable link for the labeled dataset in Language Studio.
+Dataset Download:
+Downloads the dataset to a local file (exported_dataset.json).
+Model Training:
+Initiates the training process for the project using the REST API.
+Model Deployment:
+Deploys the trained model to an endpoint.
+"""
+
