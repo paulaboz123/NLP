@@ -63,3 +63,58 @@ if hasattr(response, "entities"):
     print("Entities:")
     for entity in response.entities:
         print(f"  - {entity.category}: {entity.text}")
+
+
+############
+import requests
+import json
+import time
+
+# Replace with your Azure Language Service details
+endpoint = "https://<your-resource-name>.cognitiveservices.azure.com"
+subscription_key = "<your-api-key>"
+project_name = "<your-project-name>"
+
+# URL for training the model
+train_url = f"{endpoint}/language/authoring/projects/{project_name}/train"
+
+# Headers for authentication and content type
+headers = {
+    "Ocp-Apim-Subscription-Key": subscription_key,
+    "Content-Type": "application/json",
+}
+
+# Trigger training
+def train_model():
+    response = requests.post(train_url, headers=headers)
+    if response.status_code == 202:
+        print("Training started successfully!")
+        operation_location = response.headers.get("Operation-Location")
+        print(f"Training status URL: {operation_location}")
+        return operation_location
+    else:
+        print(f"Error: {response.status_code}")
+        print(response.json())
+        return None
+
+# Check training status
+def check_training_status(status_url):
+    while True:
+        response = requests.get(status_url, headers=headers)
+        if response.status_code == 200:
+            status = response.json()
+            print("Training Status:", status["status"])
+            if status["status"] in ["succeeded", "failed"]:
+                return status
+        else:
+            print(f"Error: {response.status_code}")
+            print(response.json())
+            return None
+        time.sleep(10)  # Wait before checking again
+
+# Main process
+status_url = train_model()
+if status_url:
+    result = check_training_status(status_url)
+    print("Training Completed. Final Status:", result)
+
