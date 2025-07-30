@@ -271,3 +271,41 @@ tokenizer.save_pretrained(final_model_path)
 
 print(f"\nNajlepszy model został zapisany w folderze: {final_model_path}")
 print("\n--- PROCES TRENINGU I OPTYMALIZACJI ZAKOŃCZONY POMYŚLNIE! ---")
+
+
+
+
+# --- SEKCJA DIAGNOSTYCZNA ---
+print("\n--- ROZPOCZYNANIE DIAGNOSTYKI ZMIENNEJ 'negative_embeddings_cleaned' ---")
+try:
+    # 1. Sprawdzenie typu i kształtu
+    print(f"Typ obiektu: {type(negative_embeddings_cleaned)}")
+    # Sprawdzamy czy to jest numpy array - jeśli tak, ma atrybut .shape
+    if isinstance(negative_embeddings_cleaned, np.ndarray):
+        print(f"Kształt macierzy (shape): {negative_embeddings_cleaned.shape}")
+        print(f"Typ danych w macierzy (dtype): {negative_embeddings_cleaned.dtype}")
+        
+        # 2. GŁĘBOKA DIAGNOSTYKA: Sprawdzenie, czy w środku nie ma "śmieci"
+        # Jeśli dtype to 'object', to prawie na pewno mamy problem
+        if negative_embeddings_cleaned.dtype == 'object':
+            print("\nOSTRZEŻENIE: dtype to 'object'! To sugeruje mieszane typy danych w macierzy.")
+            non_numeric_found = False
+            for i, emb in enumerate(negative_embeddings_cleaned):
+                # Sprawdzamy, czy element jest listą lub numpy array, a nie np. stringiem
+                if not isinstance(emb, (np.ndarray, list)):
+                    print(f"!!! ZNALEZIONO PROBLEM !!! Wiersz {i} nie jest wektorem. Jego typ to: {type(emb)}")
+                    print(f"Treść problematycznego wiersza: {emb}")
+                    print(f"Oryginalny tekst, który go wygenerował: {texts_to_encode[i]}")
+                    non_numeric_found = True
+                    break # Przerywamy po znalezieniu pierwszego problemu
+            if not non_numeric_found:
+                print("Nie znaleziono bezpośrednich 'śmieci', ale dtype 'object' jest niepokojący.")
+                
+    else:
+        print("OSTRZEŻENIE: Wynik z model.encode() nie jest standardową macierzą numpy!")
+
+except Exception as e:
+    print(f"Błąd podczas diagnostyki: {e}")
+
+print("--- ZAKOŃCZONO DIAGNOSTYKĘ ---")
+# --- KONIEC SEKCJI DIAGNOSTYCZNEJ ---
