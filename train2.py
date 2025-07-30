@@ -1,51 +1,48 @@
-# Użyj tej komendy, jeśli biblioteki nie są zainstalowane w Twoim środowisku
-# %pip install pandas torch sentence-transformers scikit-learn
-
 import pandas as pd
 import numpy as np
-from sentence_transformers import SentenceTransformer
-from sklearn.cluster import KMeans
 import torch
-import os
-import random
+import evaluate
+from sklearn.model_selection import train_test_split
+from transformers import (
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    TrainingArguments,
+    Trainer
+)
+from torch.utils.data import Dataset
 
 # Ustawienia wyświetlania dla Pandas
 pd.set_option('display.max_colwidth', 200)
-pd.set_option('display.max_rows', 100)
 
 print("Biblioteki zostały zaimportowane.")
 Use code with caution.
 Python
 Komórka 2: Konfiguracja (EDYTUJ TUTAJ)
-Jedyne miejsce, które musisz edytować. Zawiera parametry dla wszystkich trzech kroków.
+Jedyne miejsce, które musisz edytować.
 Generated python
 # --- EDYTUJ TE WARTOŚCI ---
 
-# Ścieżka do Twojego ORYGINALNEGO, surowego pliku CSV z danymi
-INPUT_RAW_DATA_PATH = '/sciezka/do/twoich/oryginalnych/danych.csv'
+# Ścieżka do Twojego FINALNEGO ZBIORU TRENINGOWEGO (wynik poprzedniego notatnika)
+TRAINING_DATA_PATH = './final_training_data_for_transformer.csv'
 
-# Ścieżka do LOKALNEGO folderu z modelem Sentence Transformer
-MODEL_PATH = '/sciezka/do/twojego/modelu/lokalnego/'
+# Ścieżka do LOKALNEGO folderu z modelem bazowym (tym samym, co do tworzenia embeddingów)
+BASE_MODEL_PATH = '/sciezka/do/twojego/modelu/lokalnego/'
 
-# Ścieżka do zapisu JEDYNEGO, FINALNEGO pliku gotowego do treningu
-OUTPUT_FINAL_TRAINING_DATA_PATH = './final_training_data_for_transformer.csv'
+# Folder, w którym będą zapisywane wyniki (modele, checkpointy)
+OUTPUT_DIR = './training_output'
 
 # Nazwy kolumn w Twoim pliku CSV
-TEXT_COLUMN = 'text'
-RELEVANT_COLUMN = 'relevant'
-LABEL_COLUMN = 'label'
+TEXT_INPUT_COLUMN = 'text_input'
+LABEL_COLUMN = 'is_match'
 
 # --- PARAMETRY PROCESU (można dostosować) ---
 
-# KROK 1: Oczyszczanie
-SIMILARITY_THRESHOLD = 0.7 # Próg podobieństwa do automatycznej korekty etykiet
+# Procent danych przeznaczony na zbiór walidacyjny
+TEST_SIZE = 0.2
 
-# KROK 2: Próbkowanie negatywów
-NUM_CLUSTERS = 75           # Liczba grup tematycznych dla zdań negatywnych
-NUM_SAMPLES_TO_SELECT = 5000 # Ile ostatecznie zdań negatywnych wybrać
-
-# KROK 3: Montaż zbioru
-HARD_NEGATIVES_RATIO = 1.0 # Stosunek "trudnych" negatywów do pozytywów (1.0 = tyle samo)
+# Liczba prób, które wykona algorytm tuningu hiperparametrów.
+# 10-20 to dobry start.
+NUM_HYPERPARAMETER_TRIALS = 15
 
 # --- Konfiguracja techniczna ---
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -54,130 +51,223 @@ print("Konfiguracja zakończona.")
 print(f"Używane urządzenie: {device.upper()}")
 Use code with caution.
 Python
-Komórka 3: Wczytanie modelu i danych surowych
+Komórka 3: Wczytanie danych i podział na zbiór treningowy/walidacyjny
 Generated python
-print("--- Etap 0: Wczytywanie zasobów ---")
+print("--- Etap 1: Wczytywanie i przygotowanie danych ---")
 
-# Wczytanie modelu
-print(f"Wczytywanie modelu z {MODEL_PATH}...")
-model = SentenceTransformer(MODEL_PATH, device=device)
-print("Model wczytany.")
+# Wczytanie finalnego zbioru
+df = pd.read_csv(TRAINING_DATA_PATH)
 
-# Wczytanie surowych danych
-print(f"\nWczytywanie surowych danych z {INPUT_RAW_DATA_PATH}...")
-df_raw = pd.read_csv(INPUT_RAW_DATA_PATH)
-df_raw[LABEL_COLUMN] = df_raw[LABEL_COLUMN].fillna('brak_etykiety')
+# Podział na zbiór treningowy i walidacyjny
+# Używamy stratify, aby zachować ten sam rozkład klas w obu zbiorach
+train_df, eval_df = train_test_split(
+    df,
+    test_size=TEST_SIZE,
+    random_state=42,
+    stratify=df[LABEL_COLUMN]
+)
 
-print("\nDane surowe wczytane pomyślnie. Rozkład etykiet 'relevant':")
-print(df_raw[RELEVANT_COLUMN].value_counts())
+print(f"Rozmiar zbioru treningowego: {len(train_df)}")
+print(f"Rozmiar zbioru walidacyjnego: {len(eval_df)}")
+print("\nRozkład etykiet w zbiorze treningowym:")
+print(train_df[LABEL_COLUMN].value_counts(normalize=True))
 Use code with caution.
 Python
-Komórka 4: Krok 1 - Oczyszczanie Danych
-Ta komórka wykonuje całą logikę znajdowania i poprawiania błędnie oznaczonych danych. Jej wynikiem jest cleaned_df przekazywany do następnego kroku.
+Komórka 4: Tokenizer i klasa Dataset
+Przygotowujemy dane do formatu, który rozumie model Transformer.
 Generated python
-print("\n--- KROK 1: OCZYSZCZANIE DANYCH ---")
+print("\n--- Etap 2: Przygotowanie Tokenizera i Datasetu ---")
 
-positive_df_raw = df_raw[df_raw[RELEVANT_COLUMN] == 1].copy()
-negative_df_raw = df_raw[df_raw[RELEVANT_COLUMN] == 0].copy()
+# Wczytanie tokenizera
+tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_PATH)
 
-if len(positive_df_raw) == 0:
-    raise ValueError("Brak danych z 'relevant=1' do stworzenia centroidów.")
+# Definicja własnej klasy Dataset
+class PairClassificationDataset(Dataset):
+    def __init__(self, texts, labels, tokenizer, max_len=512):
+        self.texts = texts
+        self.labels = labels
+        self.tokenizer = tokenizer
+        self.max_len = max_len
 
-print("Obliczanie centroidów dla każdej etykiety...")
-positive_embeddings = model.encode(positive_df_raw[TEXT_COLUMN].tolist(), show_progress_bar=True)
-positive_df_raw['embedding'] = list(positive_embeddings)
+    def __len__(self):
+        return len(self.texts)
 
-label_centroids = {label: np.mean(np.vstack(group['embedding'].values), axis=0)
-                   for label, group in positive_df_raw.groupby(LABEL_COLUMN)}
-print(f"Obliczono {len(label_centroids)} centroidów.")
+    def __getitem__(self, idx):
+        text = self.texts[idx]
+        label = self.labels[idx]
+        
+        encoding = self.tokenizer.encode_plus(
+            text,
+            add_special_tokens=True,
+            max_length=self.max_len,
+            return_token_type_ids=False,
+            padding='max_length',
+            truncation=True,
+            return_attention_mask=True,
+            return_tensors='pt',
+        )
 
-print("\nAnaliza danych 'relevant=0' w poszukiwaniu błędnych etykiet...")
-negative_embeddings_raw = model.encode(negative_df_raw[TEXT_COLUMN].tolist(), show_progress_bar=True)
-centroid_matrix = np.vstack(list(label_centroids.values()))
-centroid_names = list(label_centroids.keys())
-similarity_matrix = cosine_similarity(negative_embeddings_raw, centroid_matrix)
+        return {
+            'input_ids': encoding['input_ids'].flatten(),
+            'attention_mask': encoding['attention_mask'].flatten(),
+            'labels': torch.tensor(label, dtype=torch.long)
+        }
 
-negative_df_raw['max_similarity'] = np.max(similarity_matrix, axis=1)
-negative_df_raw['closest_label'] = [centroid_names[i] for i in np.argmax(similarity_matrix, axis=1)]
+# Utworzenie obiektów Dataset
+train_dataset = PairClassificationDataset(
+    texts=train_df[TEXT_INPUT_COLUMN].tolist(),
+    labels=train_df[LABEL_COLUMN].tolist(),
+    tokenizer=tokenizer
+)
 
-mislabeled_indices = negative_df_raw[negative_df_raw['max_similarity'] > SIMILARITY_THRESHOLD].index
+eval_dataset = PairClassificationDataset(
+    texts=eval_df[TEXT_INPUT_COLUMN].tolist(),
+    labels=eval_df[LABEL_COLUMN].tolist(),
+    tokenizer=tokenizer
+)
 
-cleaned_df = df_raw.copy()
-cleaned_df.loc[mislabeled_indices, RELEVANT_COLUMN] = 1
-cleaned_df.loc[mislabeled_indices, LABEL_COLUMN] = negative_df_raw.loc[mislabeled_indices, 'closest_label']
-
-print(f"\nZnaleziono i poprawiono {len(mislabeled_indices)} błędnie oznaczonych wierszy.")
-print("--- Krok 1 zakończony. ---")
+print("Tokenizer i obiekty Dataset gotowe.")
 Use code with caution.
 Python
-Komórka 5: Krok 2 - Próbkowanie zróżnicowanych negatywów
-Ta komórka bierze cleaned_df z poprzedniego kroku, filtruje negatywy i wykonuje na nich próbkowanie. Wynikiem jest sampled_negatives_df przekazywany do ostatniego kroku.
+Komórka 5: Definicja metryk do ewaluacji
+Definiujemy funkcję, która będzie obliczać F1-score, precyzję i czułość podczas walidacji.
 Generated python
-print("\n--- KROK 2: PRÓBKOWANIE ZRÓŻNICOWANYCH NEGATYWÓW ---")
+print("\n--- Etap 3: Definicja metryk ---")
 
-negative_df_cleaned = cleaned_df[cleaned_df[RELEVANT_COLUMN] == 0].copy().reset_index(drop=True)
+# Wczytanie metryk z biblioteki evaluate
+f1_metric = evaluate.load("f1")
+precision_metric = evaluate.load("precision")
+recall_metric = evaluate.load("recall")
 
-if len(negative_df_cleaned) < NUM_SAMPLES_TO_SELECT:
-    raise ValueError(f"Liczba próbek do wyboru ({NUM_SAMPLES_TO_SELECT}) jest większa niż dostępnych zdań negatywnych ({len(negative_df_cleaned)}).")
-print(f"Próbkowanie z {len(negative_df_cleaned)} oczyszczonych zdań negatywnych.")
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    predictions = np.argmax(logits, axis=-1)
+    
+    f1 = f1_metric.compute(predictions=predictions, references=labels, pos_label=1)["f1"]
+    precision = precision_metric.compute(predictions=predictions, references=labels, pos_label=1)["precision"]
+    recall = recall_metric.compute(predictions=predictions, references=labels, pos_label=1)["recall"]
+    
+    return {
+        "f1": f1,
+        "precision": precision,
+        "recall": recall
+    }
 
-print("Klastrowanie zdań negatywnych...")
-negative_embeddings_cleaned = model.encode(negative_df_cleaned[TEXT_COLUMN].tolist(), show_progress_bar=True, batch_size=128)
-kmeans = KMeans(n_clusters=NUM_CLUSTERS, random_state=42, n_init='auto')
-negative_df_cleaned['cluster_id'] = kmeans.fit_predict(negative_embeddings_cleaned)
-
-print("Wybór zróżnicowanych próbek (próbkowanie warstwowe)...")
-weights = 1 / negative_df_cleaned.groupby('cluster_id')['cluster_id'].transform('count')
-sampled_negatives_df = negative_df_cleaned.sample(n=NUM_SAMPLES_TO_SELECT, weights=weights, random_state=42).reset_index(drop=True)
-
-print(f"Wybrano {len(sampled_negatives_df)} zróżnicowanych zdań negatywnych.")
-print("--- Krok 2 zakończony. ---")
+print("Funkcja do obliczania metryk gotowa.")
 Use code with caution.
 Python
-Komórka 6: Krok 3 - Montaż finalnego zbioru treningowego
-Ta ostatnia komórka bierze cleaned_df i sampled_negatives_df i składa je w ostateczny, gotowy do użycia plik.
+Komórka 6: Automatyczny Tuning Hiperparametrów
+To jest serce optymalizacji. Używamy Trainer w połączeniu z optuna, aby automatycznie przetestować różne kombinacje hiperparametrów i znaleźć najlepszą.
 Generated python
-print("\n--- KROK 3: MONTAŻ FINALNEGO ZBIORU TRENINGOWEGO ---")
+print("\n--- Etap 4: Automatyczny Tuning Hiperparametrów ---")
 
-# Komponent 1: Oczyszczone zdania pozytywne
-cleaned_positives_df = cleaned_df[cleaned_df[RELEVANT_COLUMN] == 1].copy()
-# Komponent 2: Zróżnicowane zdania negatywne (już mamy jako 'sampled_negatives_df')
+# Funkcja inicjująca model. Jest wymagana przez hyperparameter_search,
+# aby każda próba zaczynała z nowym, nieprzetrenowanym modelem.
+def model_init(trial):
+    return AutoModelForSequenceClassification.from_pretrained(
+        BASE_MODEL_PATH,
+        num_labels=2,
+        return_dict=True
+    )
 
-training_data = []
-all_unique_labels = cleaned_positives_df[LABEL_COLUMN].unique().tolist()
+# Podstawowe argumenty treningowe
+training_args = TrainingArguments(
+    output_dir=f"{OUTPUT_DIR}/hyperparam_search",
+    disable_tqdm=True, # Wyłączamy paski postępu, aby nie zaśmiecać logów
+)
 
-# 1. Tworzenie przykładów POZYTYWNYCH (is_match = 1)
-print("1. Tworzenie przykładów pozytywnych...")
-for _, row in cleaned_positives_df.iterrows():
-    training_data.append({'text_input': f"{row[LABEL_COLUMN]} [SEP] {row[TEXT_COLUMN]}", 'is_match': 1})
+# Inicjalizacja Trainera
+trainer = Trainer(
+    model_init=model_init,
+    args=training_args,
+    train_dataset=train_dataset,
+    eval_dataset=eval_dataset,
+    tokenizer=tokenizer,
+    compute_metrics=compute_metrics,
+)
 
-# 2. Tworzenie przykładów "TRUDNYCH" NEGATYWNYCH (is_match = 0)
-print("2. Tworzenie 'trudnych' przykładów negatywnych...")
-num_hard_negatives = int(len(cleaned_positives_df) * HARD_NEGATIVES_RATIO)
-for _ in range(num_hard_negatives):
-    row = cleaned_positives_df.sample(n=1).iloc[0]
-    wrong_label = random.choice([l for l in all_unique_labels if l != row[LABEL_COLUMN]])
-    training_data.append({'text_input': f"{wrong_label} [SEP] {row[TEXT_COLUMN]}", 'is_match': 0})
+# Definicja przestrzeni poszukiwań dla Optuny
+def optuna_hp_space(trial):
+    return {
+        "learning_rate": trial.suggest_float("learning_rate", 1e-6, 5e-5, log=True),
+        "num_train_epochs": trial.suggest_int("num_train_epochs", 2, 4),
+        "per_device_train_batch_size": trial.suggest_categorical("per_device_train_batch_size", [8, 16]),
+        "weight_decay": trial.suggest_float("weight_decay", 0.0, 0.3),
+    }
 
-# 3. Tworzenie przykładów "ŁATWYCH" NEGATYWNYCH (is_match = 0)
-print("3. Tworzenie 'łatwych' przykładów negatywnych...")
-for _, row in sampled_negatives_df.iterrows():
-    random_label = random.choice(all_unique_labels)
-    training_data.append({'text_input': f"{random_label} [SEP] {row[TEXT_COLUMN]}", 'is_match': 0})
+# Uruchomienie poszukiwania
+print(f"Uruchamianie poszukiwania najlepszych hiperparametrów ({NUM_HYPERPARAMETER_TRIALS} prób)...")
+best_run = trainer.hyperparameter_search(
+    direction="maximize",
+    backend="optuna",
+    hp_space=optuna_hp_space,
+    n_trials=NUM_HYPERPARAMETER_TRIALS
+)
 
-# 4. Finalizacja i zapis
-print("\nFinalizacja i zapis...")
-final_training_df = pd.DataFrame(training_data)
-final_training_df = final_training_df.sample(frac=1, random_state=42).reset_index(drop=True)
+print("\n--- Poszukiwanie zakończone! ---")
+print(f"Najlepszy wynik (F1-score): {best_run.objective}")
+print("Najlepsze hiperparametry:")
+print(best_run.hyperparameters)
+Use code with caution.
+Python
+Komórka 7: Trening finalnego modelu z najlepszymi parametrami
+Teraz, gdy znamy najlepszą konfigurację, trenujemy model od nowa, używając tych optymalnych ustawień.
+Generated python
+print("\n--- Etap 5: Trening finalnego modelu z najlepszymi hiperparametrami ---")
 
-final_training_df.to_csv(OUTPUT_FINAL_TRAINING_DATA_PATH, index=False)
+# Ustawienie najlepszych parametrów znalezionych w poprzednim kroku
+best_params = best_run.hyperparameters
 
-print("\n--- PROCES PRZYGOTOWANIA DANYCH ZAKOŃCZONY POMYŚLNIE! ---")
-print(f"Utworzono i zapisano finalny zbiór treningowy zawierający {len(final_training_df)} wierszy.")
-print(f"Plik został zapisany w: {OUTPUT_FINAL_TRAINING_DATA_PATH}")
+final_training_args = TrainingArguments(
+    output_dir=f"{OUTPUT_DIR}/final_model",
+    # Użycie najlepszych parametrów
+    learning_rate=best_params["learning_rate"],
+    num_train_epochs=best_params["num_train_epochs"],
+    per_device_train_batch_size=best_params["per_device_train_batch_size"],
+    weight_decay=best_params["weight_decay"],
+    
+    # Standardowe argumenty
+    evaluation_strategy="epoch", # Ocena po każdej epoce
+    save_strategy="epoch",       # Zapisywanie modelu po każdej epoce
+    load_best_model_at_end=True, # Na końcu wczytaj najlepszy model
+    metric_for_best_model="f1",  # Użyj F1 jako metryki do wyboru najlepszego modelu
+    logging_steps=100,
+    fp16=torch.cuda.is_available(), # Użyj precyzji mieszanej (szybszy trening na GPU)
+)
 
-print("\nRozkład etykiet 'is_match' w finalnym zbiorze:")
-print(final_training_df['is_match'].value_counts())
+# Inicjalizacja finalnego Trenera
+final_trainer = Trainer(
+    model=model_init(None), # Inicjalizujemy nowy model
+    args=final_training_args,
+    train_dataset=train_dataset,
+    eval_dataset=eval_dataset,
+    tokenizer=tokenizer,
+    compute_metrics=compute_metrics,
+)
 
-print("\nPrzykładowe dane gotowe do treningu:")
-display(final_training_df.head(10))
+# Uruchomienie finalnego treningu
+print("\nUruchamianie finalnego treningu...")
+final_trainer.train()
+
+print("\n--- Trening zakończony! ---")
+Use code with caution.
+Python
+Komórka 8: Ostateczna ewaluacja i zapisanie modelu
+Na koniec sprawdzamy, jak nasz najlepszy model radzi sobie na zbiorze walidacyjnym i zapisujemy go do użytku w przyszłości.
+Generated python
+print("\n--- Etap 6: Finalna ewaluacja i zapisanie modelu ---")
+
+# Ewaluacja najlepszego modelu
+eval_results = final_trainer.evaluate()
+
+print("\nWyniki ewaluacji na zbiorze walidacyjnym:")
+for key, value in eval_results.items():
+    print(f"{key}: {value:.4f}")
+    
+# Zapisanie finalnego, najlepszego modelu
+final_model_path = f"{OUTPUT_DIR}/best_tuned_model"
+final_trainer.save_model(final_model_path)
+tokenizer.save_pretrained(final_model_path)
+
+print(f"\nNajlepszy model został zapisany w folderze: {final_model_path}")
+print("\n--- PROCES TRENINGU I OPTYMALIZACJI ZAKOŃCZONY POMYŚLNIE! ---")
