@@ -1,78 +1,93 @@
-# Uruchom tę komórkę tylko raz
-!pip install -q sentence-transformers==3.0.1 torch==2.3.1 pandas==2.2.2
-
+import pandas as pd
+import numpy as np
 import torch
 from sentence_transformers import SentenceTransformer, util
-import pandas as pd
+from collections import defaultdict
 
-# Wczytujemy model. Jeśli masz GPU, automatycznie go użyje.
-model = SentenceTransformer('all-MiniLM-L6-v2')
+# ======================================================================================
+# GŁÓWNY I OSTATECZNY BLOK KODU DO ETYKIETOWANIA I KORYGOWANIA DANYCH
+# ======================================================================================
 
-print("✅ Model SBERT gotowy do pracy.")
+# --- Konfiguracja (możesz dostosować) ---
+# Próg pewności. Jeśli dopasowanie jest poniżej tej wartości, zdanie zostanie zignorowane.
+# Dobry punkt startowy to 0.6. Zwiększ, jeśli dostajesz złe etykiety; zmniejsz, jeśli za mało.
+CONFIDENCE_THRESHOLD = 0.6
+# ------------------------------------
 
-# --- KROK 1: Przygotowanie danych bezpośrednio z Twojego DataFrame ---
+# Krok 1: Wczytanie modelu i weryfikacja GPU (jeśli dostępne)
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
+print(f"Model SBERT wczytany. Obliczenia będą wykonywane na: {device.upper()}")
 
-# Pobierz unikalne, istniejące etykiety z kolumny 'label'. Ignoruje puste wartości (NaN).
-istniejace_etykiety = df['label'].dropna().unique().tolist()
+# Krok 2: Tworzenie prototypów z Twoich 3k oznaczonych danych
+print("\n🔄 Tworzenie profili znaczeniowych dla istniejących etykiet...")
+labeled_df = df.dropna(subset=['label']).copy()
+labeled_texts = labeled_df['text'].astype(str).tolist()
+labeled_embeddings = model.encode(labeled_texts, batch_size=256, show_progress_bar=True)
 
-# Wybierz wiersze, które potrzebują etykiety:
-# - 'label' jest pusty (isnull)
-# - 'relevant' jest równe 1
-df_do_oznaczenia = df[df['label'].isnull() & (df['relevant'] == 1)].copy()
+label_embeddings_dict = defaultdict(list)
+for i in range(len(labeled_df)):
+    label = labeled_df.iloc[i]['label']
+    embedding = labeled_embeddings[i]
+    label_embeddings_dict[label].append(embedding)
 
-# Pobierz teksty z tych wierszy
-zdania_do_oznaczenia = df_do_oznaczenia['text'].tolist()
+prototype_embeddings_list = []
+prototype_labels = []
+for label, embeddings in label_embeddings_dict.items():
+    prototype_embeddings_list.append(np.mean(embeddings, axis=0))
+    prototype_labels.append(label)
 
-print(f"Znaleziono {len(istniejace_etykiety)} unikalnych etykiet w Twoich danych.")
-print(f"Znaleziono {len(zdania_do_oznaczenia)} istotnych zdań, które potrzebują etykiety.")
+prototype_embeddings = torch.tensor(np.array(prototype_embeddings_list), device=device)
+print(f"✅ Stworzono {len(prototype_labels)} profili etykiet.")
 
+# Krok 3: Przetwarzanie wszystkich nieoznaczonych wierszy
+# To jest kluczowy krok: bierzemy WSZYSTKIE wiersze bez etykiety, niezależnie od flagi 'relevant'
+rows_to_process = df[df['label'].isnull()].copy()
+texts_to_process = rows_to_process['text'].astype(str).tolist()
 
-# --- KROK 2: Uruchomienie modelu SBERT (jeśli są jakieś zdania do oznaczenia) ---
-
-if not zdania_do_oznaczenia:
-    print("\nNie znaleziono żadnych istotnych zdań do etykietowania. Praca zakończona.")
+if not texts_to_process:
+    print("\nBrak wierszy do przetworzenia.")
 else:
-    # Konwersja na wektory (embeddings)
-    etykiety_embeddings = model.encode(istniejace_etykiety, convert_to_tensor=True)
-    zdania_embeddings = model.encode(zdania_do_oznaczenia, convert_to_tensor=True)
+    print(f"\n🔄 Analizowanie {len(texts_to_process)} nieoznaczonych zdań...")
+    unlabeled_embeddings = model.encode(texts_to_process, batch_size=512, show_progress_bar=True)
+    
+    # Znajdowanie najlepszych dopasowań
+    hits = util.semantic_search(torch.tensor(unlabeled_embeddings).to(device), prototype_embeddings, top_k=1)
+    
+    update_indices = []
+    new_labels = []
 
-    # Obliczenie podobieństwa i znalezienie najlepszego dopasowania dla każdego zdania
-    wyniki_podobienstwa = util.cos_sim(zdania_embeddings, etykiety_embeddings)
+    for i, hit_list in enumerate(hits):
+        # Sprawdzamy, czy dopasowanie jest wystarczająco dobre
+        if hit_list and hit_list[0]['score'] >= CONFIDENCE_THRESHOLD:
+            # Pobieramy oryginalny indeks wiersza z głównego DataFrame
+            original_df_index = rows_to_process.index[i]
+            
+            update_indices.append(original_df_index)
+            new_labels.append(prototype_labels[hit_list[0]['corpus_id']])
 
-    przewidziane_etykiety = []
-    poziom_pewnosci = []
-
-    for i in range(len(zdania_do_oznaczenia)):
-        # Znajdź indeks etykiety z najwyższym wynikiem
-        najlepszy_index = torch.argmax(wyniki_podobienstwa[i])
-        # Pobierz nazwę tej etykiety
-        najlepsza_etykieta = istniejace_etykiety[najlepszy_index]
-        # Pobierz wynik (pewność) i zamień na procent
-        pewnosc = wyniki_podobienstwa[i][najlepszy_index] * 100
+    # Krok 4: Zastosowanie zmian w głównym DataFrame 'df'
+    if update_indices:
+        # Policz, ile flag 'relevant' zostanie zmienionych
+        flipped_relevance_count = (df.loc[update_indices, 'relevant'] == 0).sum()
         
-        przewidziane_etykiety.append(najlepsza_etykieta)
-        poziom_pewnosci.append(f"{pewnosc:.2f}%")
-
-    # --- KROK 3: Aktualizacja oryginalnego DataFrame 'df' ---
-    
-    # Dodaj nowe kolumny do tymczasowego DataFrame
-    df_do_oznaczenia['PRZEWIDZIANA_ETYKIETA'] = przewidziane_etykiety
-    df_do_oznaczenia['PEWNOSC_%'] = poziom_pewnosci
-    
-    # Zaktualizuj główny DataFrame 'df' na podstawie indeksu
-    # To zapewni, że wyniki trafią do właściwych wierszy
-    df.update(df_do_oznaczenia)
-    
-    # Opcjonalnie: od razu wypełnij pustą kolumnę 'label' nowymi przewidywaniami
-    df['label'].fillna(df['PRZEWIDZIANA_ETYKIETA'], inplace=True)
-
-    print("\n✅ Etykietowanie zakończone.")
+        print(f"\n✅ Znaleziono {len(update_indices)} pasujących zdań, które zostaną zaktualizowane.")
+        print(f"   - Zostanie zmieniona flaga 'relevant' z 0 na 1 dla {flipped_relevance_count} wierszy.")
+        
+        # Zastosuj zmiany w jednej operacji
+        df.loc[update_indices, 'label'] = new_labels
+        df.loc[update_indices, 'relevant'] = 1
+    else:
+        print("\n⚠️ Żadne zdanie nie osiągnęło wymaganego progu pewności. Nie wprowadzono żadnych zmian.")
 
 
 # --- WYNIK KOŃCOWY ---
-print("\n--- Podgląd zaktualizowanego DataFrame (pierwsze 10 wierszy) ---")
-# Wyświetlamy tylko wiersze, które zostały właśnie zaktualizowane, żeby było widać efekt
-print(df[df.index.isin(df_do_oznaczenia.index)].head(10))
+print("\n\n--- WYNIKI PRZETWARZANIA ---")
+print("Nowy rozkład wartości w kolumnie 'relevant' (powinien się zmienić):")
+print(df['relevant'].value_counts())
+print(f"\nLiczba wierszy, które nadal nie mają etykiety: {df['label'].isnull().sum()}")
 
-print("\n--- Podgląd całego DataFrame (pierwsze 10 wierszy) ---")
-print(df.head(10))
+# Wyświetl przykładowe wiersze, które zostały właśnie zmienione
+if update_indices:
+    print("\nPrzykładowe wiersze, które zostały zaktualizowane:")
+    print(df.loc[update_indices].head())
